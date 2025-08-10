@@ -13,6 +13,7 @@ import logging
 import os.path
 import numpy as np
 from tqdm import tqdm
+from contextlib import nullcontext
 
 from omegaconf import DictConfig, ListConfig
 from funasr.utils.misc import deep_update
@@ -132,6 +133,15 @@ class AutoModel:
             vad_kwargs["model"] = vad_model
             vad_kwargs["model_revision"] = kwargs.get("vad_model_revision", "master")
             vad_kwargs["device"] = kwargs["device"]
+            # inherit frontend & fs for consistent feature and sampling
+            if kwargs.get("frontend", None) is not None and "frontend" not in vad_kwargs:
+                vad_kwargs["frontend"] = kwargs["frontend"]
+            fs_main = int(kwargs.get("frontend_conf", {}).get("fs", 16000)) if isinstance(kwargs.get("frontend_conf", {}), dict) else 16000
+            if "fs" not in vad_kwargs:
+                vad_kwargs["fs"] = fs_main
+            # auto-enable telephony for vad if <=8k and not explicitly set
+            if "telephony_mode" not in vad_kwargs and fs_main <= 8000:
+                vad_kwargs["telephony_mode"] = True
             vad_model, vad_kwargs = self.build_model(**vad_kwargs)
 
         # if punc_model is not None, build punc model else None
@@ -172,6 +182,32 @@ class AutoModel:
         self.spk_kwargs = spk_kwargs
         self.model_path = kwargs.get("model_path")
 
+        # log runtime configuration for observability
+        try:
+            effective = {
+                "device": kwargs.get("device"),
+                "amp": kwargs.get("amp", False),
+                "amp_dtype": kwargs.get("amp_dtype", None),
+                "allow_tf32": kwargs.get("allow_tf32", None),
+                "compile": kwargs.get("compile", False),
+                "compile_mode": kwargs.get("compile_mode", None),
+                "profile": kwargs.get("profile", None),
+            }
+            fe = kwargs.get("frontend", None)
+            fe_conf = kwargs.get("frontend_conf", {}) or {}
+            if fe is not None:
+                effective.update({
+                    "frontend": fe.__class__.__name__,
+                    "fs": getattr(fe, "fs", fe_conf.get("fs", None)),
+                    "telephony_mode": getattr(fe, "telephony_mode", fe_conf.get("telephony_mode", None)),
+                    "use_knf": getattr(fe, "use_knf", fe_conf.get("use_knf", None)) if hasattr(fe, "__dict__") else fe_conf.get("use_knf", None),
+                    "low_freq": fe_conf.get("low_freq", None),
+                    "high_freq": fe_conf.get("high_freq", None),
+                })
+            logging.info(f"Runtime config: {effective}")
+        except Exception as _:
+            pass
+
     @staticmethod
     def build_model(**kwargs):
         assert "model" in kwargs
@@ -190,7 +226,44 @@ class AutoModel:
             kwargs["batch_size"] = 1
         kwargs["device"] = device
 
+        # optional CUDA acceleration knobs
+        if device == "cuda":
+            if kwargs.get("allow_tf32", True):
+                try:
+                    torch.backends.cuda.matmul.allow_tf32 = True
+                    torch.backends.cudnn.allow_tf32 = True
+                except Exception:
+                    pass
+            try:
+                torch.set_float32_matmul_precision("high")
+            except Exception:
+                pass
+
         torch.set_num_threads(kwargs.get("ncpu", 4))
+
+        # performance profile presets
+        profile = kwargs.get("profile", None)
+        if profile in ["latency", "balanced", "throughput"]:
+            # set reasonable defaults if not explicitly configured
+            if device == "cuda":
+                if profile == "latency":
+                    kwargs.setdefault("amp", True)
+                    kwargs.setdefault("amp_dtype", "bf16")
+                    kwargs.setdefault("compile", True)
+                    kwargs.setdefault("compile_mode", "reduce-overhead")
+                elif profile == "balanced":
+                    kwargs.setdefault("amp", True)
+                    kwargs.setdefault("amp_dtype", "fp16")
+                    kwargs.setdefault("compile", True)
+                    kwargs.setdefault("compile_mode", "default")
+                else:  # throughput
+                    kwargs.setdefault("amp", True)
+                    kwargs.setdefault("amp_dtype", "fp16")
+                    kwargs.setdefault("compile", True)
+                    kwargs.setdefault("compile_mode", "max-autotune")
+            else:
+                # CPU side: fewer threads to reduce contention if user didn't set
+                kwargs.setdefault("ncpu", max(1, kwargs.get("ncpu", 4)))
 
         # build tokenizer
         tokenizer = kwargs.get("tokenizer", None)
@@ -254,7 +327,15 @@ class AutoModel:
         kwargs["input_size"] = None
         if frontend is not None:
             frontend_class = tables.frontend_classes.get(frontend)
-            frontend = frontend_class(**kwargs.get("frontend_conf", {}))
+            frontend_conf = kwargs.get("frontend_conf", {}) or {}
+            # auto-enable telephony for <=8k if not explicitly set
+            fs_val = int(frontend_conf.get("fs", 16000))
+            if "telephony_mode" not in frontend_conf and fs_val <= 8000:
+                frontend_conf["telephony_mode"] = True
+            # try to use knf if available unless explicitly disabled
+            if "use_knf" not in frontend_conf:
+                frontend_conf["use_knf"] = True
+            frontend = frontend_class(**frontend_conf)
             kwargs["input_size"] = (
                 frontend.output_size() if hasattr(frontend, "output_size") else None
             )
@@ -266,6 +347,13 @@ class AutoModel:
         deep_update(model_conf, kwargs.get("model_conf", {}))
         deep_update(model_conf, kwargs)
         model = model_class(**model_conf)
+
+        # optional compile
+        if kwargs.get("compile", False):
+            try:
+                model = torch.compile(model, mode=kwargs.get("compile_mode", "reduce-overhead"))
+            except Exception as e:
+                logging.warning(f"torch.compile failed: {e}")
 
         # init_param
         init_param = kwargs.get("init_param", None)
@@ -358,7 +446,16 @@ class AutoModel:
 
             time1 = time.perf_counter()
             with torch.no_grad():
-                res = model.inference(**batch, **kwargs)
+                device = next(model.parameters()).device
+                use_amp = kwargs.get("amp", False) and device.type in ["cuda", "xpu"]
+                amp_dtype = torch.float16 if kwargs.get("amp_dtype", "fp16") == "fp16" else torch.bfloat16
+                ctx = (
+                    torch.autocast(device_type=device.type, dtype=amp_dtype)
+                    if use_amp
+                    else nullcontext()
+                )
+                with ctx:
+                    res = model.inference(**batch, **kwargs)
                 if isinstance(res, (list, tuple)):
                     results = res[0] if len(res) > 0 else [{"text": ""}]
                     meta_data = res[1] if len(res) > 1 else {}
@@ -482,9 +579,19 @@ class AutoModel:
                 speech_j, speech_lengths_j = slice_padding_audio_samples(
                     speech, speech_lengths, sorted_data[beg_idx:end_idx]
                 )
-                results = self.inference(
-                    speech_j, input_len=None, model=model, kwargs=kwargs, **cfg
-                )
+                with torch.no_grad():
+                    device = next(model.parameters()).device
+                    use_amp = kwargs.get("amp", False) and device.type in ["cuda", "xpu"]
+                    amp_dtype = torch.float16 if kwargs.get("amp_dtype", "fp16") == "fp16" else torch.bfloat16
+                    ctx = (
+                        torch.autocast(device_type=device.type, dtype=amp_dtype)
+                        if use_amp
+                        else nullcontext()
+                    )
+                    with ctx:
+                        results = self.inference(
+                            speech_j, input_len=None, model=model, kwargs=kwargs, **cfg
+                        )
                 if self.spk_model is not None:
                     # compose vad segments: [[start_time_sec, end_time_sec, speech], [...]]
                     for _b in range(len(speech_j)):

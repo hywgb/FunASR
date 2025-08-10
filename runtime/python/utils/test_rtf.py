@@ -13,6 +13,9 @@ parser.add_argument("--quantize", type=str2bool, default=False, help="quantized 
 parser.add_argument(
     "--intra_op_num_threads", type=int, default=1, help="intra_op_num_threads for onnx"
 )
+parser.add_argument("--fs", type=int, default=16000)
+parser.add_argument("--enable_amp", type=str2bool, default=False)
+parser.add_argument("--telephony_mode", type=str2bool, default=False)
 args = parser.parse_args()
 
 
@@ -21,19 +24,23 @@ from funasr.runtime.python.libtorch.funasr_torch import Paraformer
 if args.backend == "onnx":
     from funasr.runtime.python.onnxruntime.funasr_onnx import Paraformer
 
+frontend_conf = {"fs": args.fs}
+if args.telephony_mode or args.fs <= 8000:
+    frontend_conf["telephony_mode"] = True
 model = Paraformer(
     args.model_dir,
     batch_size=1,
     quantize=args.quantize,
     intra_op_num_threads=args.intra_op_num_threads,
+    frontend_conf=frontend_conf,
 )
 
 wav_file_f = open(args.wav_file, "r")
 wav_files = wav_file_f.readlines()
 
-# warm-up
+# warm-up（可简化次数以缩短预热）
 total = 0.0
-num = 30
+num = 10
 wav_path = (
     wav_files[0].split("\t")[1].strip()
     if "\t" in wav_files[0]
@@ -72,8 +79,10 @@ for i, wav_path_i in enumerate(wav_files):
         if "\t" in wav_path_i
         else wav_path_i.split(" ")[1].strip()
     )
-    waveform, _ = librosa.load(wav_path, sr=16000)
+    waveform, _ = librosa.load(wav_path, sr=args.fs)
     duration_time += len(waveform) / 16.0
 print("total_time_wav_ms: {}".format(int(duration_time)))
 
 print("total_rtf: {:.5}".format(duration / duration_time))
+if args.fs <= 8000:
+    print("note: 8k telephony test; ensure telephony_mode enabled and mel band limited.")

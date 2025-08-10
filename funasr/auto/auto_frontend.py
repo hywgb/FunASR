@@ -79,6 +79,7 @@ class AutoFrontend:
                 audio_sample_list,
                 data_type=kwargs.get("data_type", "sound"),
                 frontend=self.frontend,
+                pin_memory=True if kwargs.get("device", "cpu").startswith("cuda") else False,
                 **kwargs,
             )
             time3 = time.perf_counter()

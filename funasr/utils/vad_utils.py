@@ -18,13 +18,19 @@ def slice_padding_fbank(speech, speech_lengths, vad_segments):
     return feats_pad, speech_lengths_pad
 
 
-def slice_padding_audio_samples(speech, speech_lengths, vad_segments):
+def slice_padding_audio_samples(speech, speech_lengths, vad_segments, pin_memory: bool = False):
     speech_list = []
     speech_lengths_list = []
     for i, segment in enumerate(vad_segments):
         bed_idx = int(segment[0][0] * 16)
         end_idx = min(int(segment[0][1] * 16), speech_lengths)
+        # slicing is view; clone only if requested for pinned memory
         speech_i = speech[bed_idx:end_idx]
+        if pin_memory and torch.cuda.is_available():
+            try:
+                speech_i = speech_i.contiguous().pin_memory()
+            except Exception:
+                pass
         speech_lengths_i = end_idx - bed_idx
         speech_list.append(speech_i)
         speech_lengths_list.append(speech_lengths_i)

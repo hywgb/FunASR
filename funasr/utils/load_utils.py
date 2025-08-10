@@ -218,7 +218,16 @@ def extract_fbank(data, data_len=None, data_type: str = "sound", frontend=None, 
 
     if isinstance(data_len, (list, tuple)):
         data_len = torch.tensor([data_len])
-    return data.to(torch.float32), data_len.to(torch.int32)
+    data = data.to(torch.float32)
+    data_len = data_len.to(torch.int32)
+    # optional pin memory for faster H2D when using CUDA
+    if kwargs.get("pin_memory", False) and torch.cuda.is_available():
+        try:
+            data = data.pin_memory()
+            data_len = data_len.pin_memory()
+        except Exception:
+            pass
+    return data, data_len
 
 
 def _load_audio_ffmpeg(file: str, sr: int = 16000):

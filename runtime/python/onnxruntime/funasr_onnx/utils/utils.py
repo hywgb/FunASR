@@ -16,6 +16,7 @@ try:
         SessionOptions,
         get_available_providers,
         get_device,
+        ExecutionMode,
     )
 except:
     print("please pip3 install onnxruntime")
@@ -184,13 +185,36 @@ class ONNXRuntimeError(Exception):
 
 
 class OrtInferSession:
-    def __init__(self, model_file, device_id=-1, intra_op_num_threads=4):
+    def __init__(
+        self,
+        model_file,
+        device_id=-1,
+        intra_op_num_threads=4,
+        enable_cpu_mem_arena: bool = True,
+        enable_mem_pattern: bool = True,
+        allow_spinning: bool = True,
+        execution_mode_parallel: bool = True,
+        use_cuda_graph: bool = True,
+        cuda_provider_options_extra: dict = None,
+        cpu_provider_options_extra: dict = None,
+    ):
         device_id = str(device_id)
         sess_opt = SessionOptions()
         sess_opt.intra_op_num_threads = intra_op_num_threads
         sess_opt.log_severity_level = 4
-        sess_opt.enable_cpu_mem_arena = False
+        sess_opt.enable_cpu_mem_arena = bool(enable_cpu_mem_arena)
+        sess_opt.enable_mem_pattern = bool(enable_mem_pattern)
         sess_opt.graph_optimization_level = GraphOptimizationLevel.ORT_ENABLE_ALL
+        # execution mode
+        try:
+            sess_opt.execution_mode = ExecutionMode.ORT_PARALLEL if execution_mode_parallel else ExecutionMode.ORT_SEQUENTIAL
+        except Exception:
+            pass
+        # reduce tail latency on small batches
+        try:
+            sess_opt.add_session_config_entry("session.intra_op.allow_spinning", "1" if allow_spinning else "0")
+        except Exception:
+            pass
 
         cuda_ep = "CUDAExecutionProvider"
         cuda_provider_options = {
@@ -199,10 +223,17 @@ class OrtInferSession:
             "cudnn_conv_algo_search": "EXHAUSTIVE",
             "do_copy_in_default_stream": "true",
         }
+        # optional CUDA graph & tunable ops
+        if use_cuda_graph:
+            cuda_provider_options["enable_cuda_graph"] = "1"
+        if cuda_provider_options_extra:
+            cuda_provider_options.update({k: str(v) for k, v in cuda_provider_options_extra.items()})
         cpu_ep = "CPUExecutionProvider"
         cpu_provider_options = {
             "arena_extend_strategy": "kSameAsRequested",
         }
+        if cpu_provider_options_extra:
+            cpu_provider_options.update({k: str(v) for k, v in cpu_provider_options_extra.items()})
 
         EP_list = []
         if device_id != "-1" and get_device() == "GPU" and cuda_ep in get_available_providers():
@@ -220,6 +251,14 @@ class OrtInferSession:
                 "https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html",
                 RuntimeWarning,
             )
+        # log runtime providers and options
+        try:
+            prov = self.session.get_providers()
+            logging.getLogger("funasr_onnx").info(
+                f"ONNXRuntime providers: {prov}; EP_list requested: {EP_list}; intra_threads={intra_op_num_threads}"
+            )
+        except Exception:
+            pass
 
     def __call__(self, input_content: List[Union[np.ndarray, np.ndarray]]) -> np.ndarray:
         input_dict = dict(zip(self.get_input_names(), input_content))

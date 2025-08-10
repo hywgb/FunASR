@@ -75,10 +75,24 @@ class Paraformer:
         self.frontend = WavFrontendOnline(cmvn_file=cmvn_file, **config["frontend_conf"])
         self.pe = SinusoidalPositionEncoderOnline()
         self.ort_encoder_infer = OrtInferSession(
-            encoder_model_file, device_id, intra_op_num_threads=intra_op_num_threads
+            encoder_model_file,
+            device_id,
+            intra_op_num_threads=intra_op_num_threads,
+            enable_cpu_mem_arena=True,
+            enable_mem_pattern=True,
+            allow_spinning=True,
+            execution_mode_parallel=True,
+            use_cuda_graph=True,
         )
         self.ort_decoder_infer = OrtInferSession(
-            decoder_model_file, device_id, intra_op_num_threads=intra_op_num_threads
+            decoder_model_file,
+            device_id,
+            intra_op_num_threads=intra_op_num_threads,
+            enable_cpu_mem_arena=True,
+            enable_mem_pattern=True,
+            allow_spinning=True,
+            execution_mode_parallel=True,
+            use_cuda_graph=True,
         )
         self.batch_size = batch_size
         self.chunk_size = chunk_size

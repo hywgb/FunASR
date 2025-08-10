@@ -26,6 +26,9 @@ class WavFrontend:
         lfr_m: int = 1,
         lfr_n: int = 1,
         dither: float = 1.0,
+        telephony_mode: bool = False,
+        low_freq: float = None,
+        high_freq: float = None,
         **kwargs,
     ) -> None:
 
@@ -39,6 +42,15 @@ class WavFrontend:
         opts.energy_floor = 0
         opts.frame_opts.snip_edges = True
         opts.mel_opts.debug_mel = False
+        # telephony band config
+        telephony_mode = telephony_mode or (fs <= 8000)
+        if low_freq is None:
+            low_freq = 50.0 if telephony_mode else 20.0
+        if high_freq is None:
+            nyquist = 0.5 * fs
+            high_freq = min(3800.0, nyquist - 100.0) if telephony_mode else nyquist - 100.0
+        opts.mel_opts.low_freq = float(max(0.0, low_freq))
+        opts.mel_opts.high_freq = float(max(opts.mel_opts.low_freq + 10.0, high_freq))
         self.opts = opts
 
         self.lfr_m = lfr_m
