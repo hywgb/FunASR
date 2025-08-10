@@ -82,7 +82,14 @@ class Paraformer:
         self.tokenizer = CharTokenizer()
         self.frontend = WavFrontend(cmvn_file=cmvn_file, **config["frontend_conf"])
         self.ort_infer = OrtInferSession(
-            model_file, device_id, intra_op_num_threads=intra_op_num_threads
+            model_file,
+            device_id,
+            intra_op_num_threads=intra_op_num_threads,
+            enable_cpu_mem_arena=True,
+            enable_mem_pattern=True,
+            allow_spinning=True,
+            execution_mode_parallel=True,
+            use_cuda_graph=True,
         )
         self.batch_size = batch_size
         self.plot_timestamp_to = plot_timestamp_to
@@ -326,10 +333,24 @@ class ContextualParaformer(Paraformer):
         self.tokenizer = CharTokenizer()
         self.frontend = WavFrontend(cmvn_file=cmvn_file, **config["frontend_conf"])
         self.ort_infer_bb = OrtInferSession(
-            model_bb_file, device_id, intra_op_num_threads=intra_op_num_threads
+            model_bb_file,
+            device_id,
+            intra_op_num_threads=intra_op_num_threads,
+            enable_cpu_mem_arena=True,
+            enable_mem_pattern=True,
+            allow_spinning=True,
+            execution_mode_parallel=True,
+            use_cuda_graph=True,
         )
         self.ort_infer_eb = OrtInferSession(
-            model_eb_file, device_id, intra_op_num_threads=intra_op_num_threads
+            model_eb_file,
+            device_id,
+            intra_op_num_threads=intra_op_num_threads,
+            enable_cpu_mem_arena=True,
+            enable_mem_pattern=True,
+            allow_spinning=True,
+            execution_mode_parallel=True,
+            use_cuda_graph=True,
         )
 
         self.batch_size = batch_size
