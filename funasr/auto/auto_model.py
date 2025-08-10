@@ -133,6 +133,15 @@ class AutoModel:
             vad_kwargs["model"] = vad_model
             vad_kwargs["model_revision"] = kwargs.get("vad_model_revision", "master")
             vad_kwargs["device"] = kwargs["device"]
+            # inherit frontend & fs for consistent feature and sampling
+            if kwargs.get("frontend", None) is not None and "frontend" not in vad_kwargs:
+                vad_kwargs["frontend"] = kwargs["frontend"]
+            fs_main = int(kwargs.get("frontend_conf", {}).get("fs", 16000)) if isinstance(kwargs.get("frontend_conf", {}), dict) else 16000
+            if "fs" not in vad_kwargs:
+                vad_kwargs["fs"] = fs_main
+            # auto-enable telephony for vad if <=8k and not explicitly set
+            if "telephony_mode" not in vad_kwargs and fs_main <= 8000:
+                vad_kwargs["telephony_mode"] = True
             vad_model, vad_kwargs = self.build_model(**vad_kwargs)
 
         # if punc_model is not None, build punc model else None
