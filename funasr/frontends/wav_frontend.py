@@ -292,6 +292,7 @@ class WavFrontendOnline(nn.Module):
         telephony_mode: bool = False,
         low_freq: float = None,
         high_freq: float = None,
+        use_knf: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -324,6 +325,21 @@ class WavFrontendOnline(nn.Module):
             high_freq = min(3800.0, nyquist - 100.0) if self.telephony_mode else nyquist - 100.0
         self.low_freq = max(0.0, float(low_freq))
         self.high_freq = max(self.low_freq + 10.0, float(high_freq))
+        # high-performance backend
+        self.use_knf = bool(use_knf and _KNF_AVAILABLE)
+        if self.use_knf:
+            self.knf_opts = knf.FbankOptions()
+            self.knf_opts.frame_opts.samp_freq = fs
+            self.knf_opts.frame_opts.dither = dither
+            self.knf_opts.frame_opts.window_type = window
+            self.knf_opts.frame_opts.frame_shift_ms = float(frame_shift)
+            self.knf_opts.frame_opts.frame_length_ms = float(frame_length)
+            self.knf_opts.mel_opts.num_bins = n_mels
+            self.knf_opts.energy_floor = 0
+            self.knf_opts.frame_opts.snip_edges = snip_edges
+            self.knf_opts.mel_opts.debug_mel = False
+            self.knf_opts.mel_opts.low_freq = float(self.low_freq)
+            self.knf_opts.mel_opts.high_freq = float(self.high_freq)
         # self.input_cache = None
         # self.lfr_splice_cache = []
 
@@ -438,8 +454,6 @@ class WavFrontendOnline(nn.Module):
                         energy_floor=0.0,
                         window_type=self.window,
                         sample_frequency=self.fs,
-                        low_freq=self.low_freq,
-                        high_freq=self.high_freq,
                     )
 
                 feat_length = mat.size(0)
@@ -452,6 +466,16 @@ class WavFrontendOnline(nn.Module):
         cache["fbanks"] = feats_pad
         cache["fbanks_lens"] = copy.deepcopy(feats_lens)
         return waveforms, feats_pad, feats_lens
+
+    def _fbank_knf(self, waveform_16bit_scaled: torch.Tensor) -> np.ndarray:
+        w = waveform_16bit_scaled.cpu().numpy().astype(np.float32)
+        fbank_fn = knf.OnlineFbank(self.knf_opts)
+        fbank_fn.accept_waveform(self.knf_opts.frame_opts.samp_freq, w.tolist())
+        frames = fbank_fn.num_frames_ready
+        mat = np.empty([frames, self.knf_opts.mel_opts.num_bins], dtype=np.float32)
+        for j in range(frames):
+            mat[j, :] = fbank_fn.get_frame(j)
+        return mat
 
     def forward_lfr_cmvn(
         self,
