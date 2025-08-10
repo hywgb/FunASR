@@ -182,6 +182,32 @@ class AutoModel:
         self.spk_kwargs = spk_kwargs
         self.model_path = kwargs.get("model_path")
 
+        # log runtime configuration for observability
+        try:
+            effective = {
+                "device": kwargs.get("device"),
+                "amp": kwargs.get("amp", False),
+                "amp_dtype": kwargs.get("amp_dtype", None),
+                "allow_tf32": kwargs.get("allow_tf32", None),
+                "compile": kwargs.get("compile", False),
+                "compile_mode": kwargs.get("compile_mode", None),
+                "profile": kwargs.get("profile", None),
+            }
+            fe = kwargs.get("frontend", None)
+            fe_conf = kwargs.get("frontend_conf", {}) or {}
+            if fe is not None:
+                effective.update({
+                    "frontend": fe.__class__.__name__,
+                    "fs": getattr(fe, "fs", fe_conf.get("fs", None)),
+                    "telephony_mode": getattr(fe, "telephony_mode", fe_conf.get("telephony_mode", None)),
+                    "use_knf": getattr(fe, "use_knf", fe_conf.get("use_knf", None)) if hasattr(fe, "__dict__") else fe_conf.get("use_knf", None),
+                    "low_freq": fe_conf.get("low_freq", None),
+                    "high_freq": fe_conf.get("high_freq", None),
+                })
+            logging.info(f"Runtime config: {effective}")
+        except Exception as _:
+            pass
+
     @staticmethod
     def build_model(**kwargs):
         assert "model" in kwargs
@@ -208,6 +234,10 @@ class AutoModel:
                     torch.backends.cudnn.allow_tf32 = True
                 except Exception:
                     pass
+            try:
+                torch.set_float32_matmul_precision("high")
+            except Exception:
+                pass
 
         torch.set_num_threads(kwargs.get("ncpu", 4))
 
