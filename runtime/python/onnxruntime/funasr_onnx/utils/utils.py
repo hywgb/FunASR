@@ -251,6 +251,14 @@ class OrtInferSession:
                 "https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html",
                 RuntimeWarning,
             )
+        # log runtime providers and options
+        try:
+            prov = self.session.get_providers()
+            logging.getLogger("funasr_onnx").info(
+                f"ONNXRuntime providers: {prov}; EP_list requested: {EP_list}; intra_threads={intra_op_num_threads}"
+            )
+        except Exception:
+            pass
 
     def __call__(self, input_content: List[Union[np.ndarray, np.ndarray]]) -> np.ndarray:
         input_dict = dict(zip(self.get_input_names(), input_content))
