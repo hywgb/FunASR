@@ -211,6 +211,30 @@ class AutoModel:
 
         torch.set_num_threads(kwargs.get("ncpu", 4))
 
+        # performance profile presets
+        profile = kwargs.get("profile", None)
+        if profile in ["latency", "balanced", "throughput"]:
+            # set reasonable defaults if not explicitly configured
+            if device == "cuda":
+                if profile == "latency":
+                    kwargs.setdefault("amp", True)
+                    kwargs.setdefault("amp_dtype", "bf16")
+                    kwargs.setdefault("compile", True)
+                    kwargs.setdefault("compile_mode", "reduce-overhead")
+                elif profile == "balanced":
+                    kwargs.setdefault("amp", True)
+                    kwargs.setdefault("amp_dtype", "fp16")
+                    kwargs.setdefault("compile", True)
+                    kwargs.setdefault("compile_mode", "default")
+                else:  # throughput
+                    kwargs.setdefault("amp", True)
+                    kwargs.setdefault("amp_dtype", "fp16")
+                    kwargs.setdefault("compile", True)
+                    kwargs.setdefault("compile_mode", "max-autotune")
+            else:
+                # CPU side: fewer threads to reduce contention if user didn't set
+                kwargs.setdefault("ncpu", max(1, kwargs.get("ncpu", 4)))
+
         # build tokenizer
         tokenizer = kwargs.get("tokenizer", None)
         kwargs["tokenizer"] = tokenizer
