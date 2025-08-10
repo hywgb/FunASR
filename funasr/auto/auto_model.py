@@ -13,6 +13,7 @@ import logging
 import os.path
 import numpy as np
 from tqdm import tqdm
+from contextlib import nullcontext
 
 from omegaconf import DictConfig, ListConfig
 from funasr.utils.misc import deep_update
@@ -190,6 +191,15 @@ class AutoModel:
             kwargs["batch_size"] = 1
         kwargs["device"] = device
 
+        # optional CUDA acceleration knobs
+        if device == "cuda":
+            if kwargs.get("allow_tf32", True):
+                try:
+                    torch.backends.cuda.matmul.allow_tf32 = True
+                    torch.backends.cudnn.allow_tf32 = True
+                except Exception:
+                    pass
+
         torch.set_num_threads(kwargs.get("ncpu", 4))
 
         # build tokenizer
@@ -266,6 +276,13 @@ class AutoModel:
         deep_update(model_conf, kwargs.get("model_conf", {}))
         deep_update(model_conf, kwargs)
         model = model_class(**model_conf)
+
+        # optional compile
+        if kwargs.get("compile", False):
+            try:
+                model = torch.compile(model, mode=kwargs.get("compile_mode", "reduce-overhead"))
+            except Exception as e:
+                logging.warning(f"torch.compile failed: {e}")
 
         # init_param
         init_param = kwargs.get("init_param", None)
@@ -358,7 +375,16 @@ class AutoModel:
 
             time1 = time.perf_counter()
             with torch.no_grad():
-                res = model.inference(**batch, **kwargs)
+                device = next(model.parameters()).device
+                use_amp = kwargs.get("amp", False) and device.type in ["cuda", "xpu"]
+                amp_dtype = torch.float16 if kwargs.get("amp_dtype", "fp16") == "fp16" else torch.bfloat16
+                ctx = (
+                    torch.autocast(device_type=device.type, dtype=amp_dtype)
+                    if use_amp
+                    else nullcontext()
+                )
+                with ctx:
+                    res = model.inference(**batch, **kwargs)
                 if isinstance(res, (list, tuple)):
                     results = res[0] if len(res) > 0 else [{"text": ""}]
                     meta_data = res[1] if len(res) > 1 else {}
@@ -482,9 +508,19 @@ class AutoModel:
                 speech_j, speech_lengths_j = slice_padding_audio_samples(
                     speech, speech_lengths, sorted_data[beg_idx:end_idx]
                 )
-                results = self.inference(
-                    speech_j, input_len=None, model=model, kwargs=kwargs, **cfg
-                )
+                with torch.no_grad():
+                    device = next(model.parameters()).device
+                    use_amp = kwargs.get("amp", False) and device.type in ["cuda", "xpu"]
+                    amp_dtype = torch.float16 if kwargs.get("amp_dtype", "fp16") == "fp16" else torch.bfloat16
+                    ctx = (
+                        torch.autocast(device_type=device.type, dtype=amp_dtype)
+                        if use_amp
+                        else nullcontext()
+                    )
+                    with ctx:
+                        results = self.inference(
+                            speech_j, input_len=None, model=model, kwargs=kwargs, **cfg
+                        )
                 if self.spk_model is not None:
                     # compose vad segments: [[start_time_sec, end_time_sec, speech], [...]]
                     for _b in range(len(speech_j)):

@@ -1,0 +1,78 @@
+# FunASR 系统学习笔记（架构/设计/功能/优化建议）
+
+## 架构总览
+- 核心包：`funasr/`
+  - `auto/auto_model.py`：统一的高层推理编排器（模型/前端/VAD/标点/说话人聚类），对外暴露 `AutoModel.generate()`。
+  - `frontends/wav_frontend.py`：基于 `torchaudio.compliance.kaldi.fbank` 的声学前端，支持 LFR、CMVN、在线/离线两套实现。
+  - `models/*`：包含 Paraformer/CT-Transformer/SenseVoice/FSMN-VAD 等模型及导出元信息。
+  - `utils/*`：I/O、重采样、字典、时间戳、VAD段拼接等工具集。
+  - `bin/`：Hydra CLI 入口（`funasr`, `funasr-train`, `funasr-export`）。
+- 运行时：`runtime/`
+  - `python/onnxruntime` 与 `python/libtorch`：ONNXRuntime 与 TorchScript 推理封装，含前端 `kaldi_native_fbank` 实现，HTTP/WS/GRPC 示例与工具。
+  - `triton_gpu`：Triton 模型库结构，特征提取/编码/解码流水线，client 脚本。
+  - `onnxruntime/src`：C++端 ONNX 运行时组件（VAD/Paraformer等）。
+- 文档与示例：`README*_*.md`、`examples/`、`docs/`。
+
+## 关键设计
+- 统一流水线（AutoModel）：
+  - 可选加载 `vad_model`、`punc_model`、`spk_model`；对长音频先VAD切段、可合段、随后批/动态批推理、可做说话人聚类、句级时间戳。
+  - 自动从 ModelScope/HuggingFace 下载权重，Hydra 统一配置。
+- 前端特征：
+  - 离线：`WavFrontend`；在线：`WavFrontendOnline`，均支持 LFR/CMVN，fbank 由 kaldi 或 knf 提供。
+  - 本次增强：加入 `telephony_mode/low_freq/high_freq` 并贯通 Python/ONNXRuntime/libtorch/Triton 前端。
+- I/O与重采样：
+  - `utils/load_utils.load_audio_text_image_video` 首选 `torchaudio` 读取，必要时回退 `ffmpeg`；自动按 `fs` 重采样。
+- VAD：
+  - `models/fsmn_vad_streaming/model.py` 实现窗口/状态机/打分逻辑，支持离线与流式，和前端深度集成。
+
+## 功能覆盖
+- ASR（离线/流式）、VAD（离线/流式）、标点恢复、时间戳、说话人聚类/分离、KWS、情感识别、Whisper/Qwen-Audio 等。
+- 导出与部署：`funasr-export`，ONNX/TorchScript；`runtime` 提供 HTTP/WS/GRPC/Triton 多后端。
+
+## 本次改进
+- 8k电话音频增强：
+  - 在 `funasr/frontends/wav_frontend.py` 新增 `telephony_mode/low_freq/high_freq`，向 `kaldi.fbank` 传递 `low_freq/high_freq`；在线版同样支持。
+  - 在 `runtime/python/onnxruntime/funasr_onnx/utils/frontend.py` 与 `runtime/python/libtorch/funasr_torch/utils/frontend.py` 注入同等参数，映射到 `knf.FbankOptions.mel_opts.low_freq/high_freq`。
+  - Triton 前端（在线/离线/SenseVoice）读取 `frontend_conf.telephony_mode/low_freq/high_freq`，设置 `kaldifeat.FbankOptions.mel_opts`。
+  - `README.md` 与 `README_zh.md` 增加 8k 说明与CLI示例。
+- CUDA 加速路径：
+  - `funasr/auto/auto_model.py` 增加：
+    - TF32 允许开关（默认启用）。
+    - 可选 `torch.compile`（失败自动回退）。
+    - 可选 `amp` autocast（fp16/bf16），在 `inference` 与 `inference_with_vad` 的子推理中启用，保持一致性。
+
+## 性能瓶颈与优化建议
+- 前端计算：
+  - Python `torchaudio.compliance.kaldi.fbank` 单条/循环调用较多，CPU端易成为热点；已在ONNX/libtorch路径使用 `kaldi_native_fbank`，建议统一迁移或在Python路径引入 knf 后端以减少Python开销。
+- 数据加载：
+  - `torchaudio.load` 与 `ffmpeg` 回退存在I/O抖动，建议：
+    - 服务化时使用内存字节流/零拷贝；
+    - 批内文件按长度排序后批处理，减少pad；
+    - Web/WS端建议固定分片长度以稳RTF。
+- 推理计算：
+  - 默认未开启 AMP/TF32/compile；已加入可选开关。生产建议：
+    - GPU: `amp=true, amp_dtype=fp16/bf16, allow_tf32=true, compile=true`。
+    - CPU: 打开 `onnxruntime` 的 `intra_op_num_threads`；尽量启用动态批（`batch_size_s`）与VAD合段。
+- Triton：
+  - 特征提取与编码器分模型部署已具备，建议：
+    - 使用并发实例+动态批，配合 preferred_batch_size/queue-delay。
+    - 在线服务将 `chunk_size_s` 与窗口对齐，减少上下文重复计算。
+- VAD：
+  - 窗口/状态机在Python层做大量张量拼接与列表操作，建议热点路径用张量预分配与环形缓冲；
+  - 对纯8k电话场景，适当收紧 `decibel_thres/snr_thres`，结合 `telephony_mode` 的带宽，能降低误检。
+
+## 生产化最佳实践
+- 配置样例（8k 电话 + GPU 加速）：
+  - Hydra CLI：
+    - `++frontend=wav_frontend ++frontend_conf.fs=8000 ++frontend_conf.telephony_mode=true ++amp=true ++amp_dtype=fp16 ++allow_tf32=true ++compile=true`
+  - 或在模型配置 `frontend_conf` 中持久化上述参数。
+- 监控与回归：
+  - 建立RTF/显存/吞吐监控，VAD召回/精确度回归；
+  - 对齐 `runtime/python/utils/test_rtf.py` 结果，保证RTF趋势与数据时长一致。
+
+## 后续可落地优化
+- 统一Python前端到 `kaldi_native_fbank`；
+- 引入 FlashAttention/SDPA（需评估模型结构是否可用）；
+- Triton 中 encoder/decoder 融合或流水化；
+- 更细粒度的多路并发调度和自适应动态批策略；
+- 针对8k的专有声学模型/高通滤波增强（当前已通过mel带宽限制适配，但端到端再训练效果更佳）。

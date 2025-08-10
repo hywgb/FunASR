@@ -239,6 +239,17 @@ class TritonPythonModel:
         opts.frame_opts.frame_shift_ms = float(config["frontend_conf"]["frame_shift"])
         opts.frame_opts.frame_length_ms = float(config["frontend_conf"]["frame_length"])
         opts.frame_opts.samp_freq = int(config["frontend_conf"]["fs"])
+        # telephony band config
+        telephony_mode = config["frontend_conf"].get("telephony_mode", False) or (opts.frame_opts.samp_freq <= 8000)
+        low_freq = config["frontend_conf"].get("low_freq", None)
+        high_freq = config["frontend_conf"].get("high_freq", None)
+        if low_freq is None:
+            low_freq = 50.0 if telephony_mode else 20.0
+        if high_freq is None:
+            nyquist = 0.5 * opts.frame_opts.samp_freq
+            high_freq = min(3800.0, nyquist - 100.0) if telephony_mode else nyquist - 100.0
+        opts.mel_opts.low_freq = float(max(0.0, low_freq))
+        opts.mel_opts.high_freq = float(max(opts.mel_opts.low_freq + 10.0, high_freq))
         opts.device = torch.device(self.device)
         self.opts = opts
         self.feature_extractor = Fbank(self.opts)

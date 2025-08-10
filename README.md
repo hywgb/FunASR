@@ -128,6 +128,16 @@ FunASR has open-sourced a large number of pre-trained models on industrial data.
 <a name="quick-start"></a>
 ## Quick Start
 
+### 8k telephony speech support
+- Set `frontend_conf.telephony_mode: true` (or `fs=8000`) to enable telephony-friendly mel band (default low≈50Hz, high≈3.8kHz, with Nyquist guard).
+- Optionally override `low_freq`/`high_freq`.
+- Applied to Python (AutoModel), ONNXRuntime frontend, libtorch frontend, Triton feature extractor.
+
+Example (Hydra CLI):
+```bash
+funasr ++model=paraformer-zh ++input=asr_example_zh.wav ++frontend=wav_frontend ++frontend_conf.fs=8000 ++frontend_conf.telephony_mode=true
+```
+
 Below is a quick start tutorial. Test audio files ([Mandarin](https://isv-data.oss-cn-hangzhou.aliyuncs.com/ics/MaaS/ASR/test_audio/vad_example.wav), [English](https://isv-data.oss-cn-hangzhou.aliyuncs.com/ics/MaaS/ASR/test_audio/asr_example_en.wav)).
 
 ### Command-line usage

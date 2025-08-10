@@ -94,6 +94,9 @@ class WavFrontend(nn.Module):
         dither: float = 1.0,
         snip_edges: bool = True,
         upsacle_samples: bool = True,
+        telephony_mode: bool = False,
+        low_freq: float = None,
+        high_freq: float = None,
         **kwargs,
     ):
         super().__init__()
@@ -111,6 +114,17 @@ class WavFrontend(nn.Module):
         self.snip_edges = snip_edges
         self.upsacle_samples = upsacle_samples
         self.cmvn = None if self.cmvn_file is None else load_cmvn(self.cmvn_file)
+        # frequency range settings for mel filterbanks
+        self.telephony_mode = telephony_mode or (fs <= 8000)
+        # If not specified, choose sensible defaults
+        if low_freq is None:
+            low_freq = 50.0 if self.telephony_mode else 20.0
+        if high_freq is None:
+            # Keep a small guard below Nyquist; for telephony, cap near 3.8k
+            nyquist = 0.5 * fs
+            high_freq = min(3800.0, nyquist - 100.0) if self.telephony_mode else nyquist - 100.0
+        self.low_freq = max(0.0, float(low_freq))
+        self.high_freq = max(self.low_freq + 10.0, float(high_freq))
 
     def output_size(self) -> int:
         return self.n_mels * self.lfr_m
@@ -140,6 +154,8 @@ class WavFrontend(nn.Module):
                 window_type=self.window,
                 sample_frequency=self.fs,
                 snip_edges=self.snip_edges,
+                low_freq=self.low_freq,
+                high_freq=self.high_freq,
             )
 
             if self.lfr_m != 1 or self.lfr_n != 1:
@@ -177,6 +193,8 @@ class WavFrontend(nn.Module):
                 energy_floor=0.0,
                 window_type=self.window,
                 sample_frequency=self.fs,
+                low_freq=self.low_freq,
+                high_freq=self.high_freq,
             )
 
             feat_length = mat.size(0)
@@ -227,6 +245,9 @@ class WavFrontendOnline(nn.Module):
         dither: float = 1.0,
         snip_edges: bool = True,
         upsacle_samples: bool = True,
+        telephony_mode: bool = False,
+        low_freq: float = None,
+        high_freq: float = None,
         **kwargs,
     ):
         super().__init__()
@@ -250,6 +271,15 @@ class WavFrontendOnline(nn.Module):
         # self.fbanks = None
         # self.fbanks_lens = None
         self.cmvn = None if self.cmvn_file is None else load_cmvn(self.cmvn_file)
+        # frequency range settings
+        self.telephony_mode = telephony_mode or (fs <= 8000)
+        if low_freq is None:
+            low_freq = 50.0 if self.telephony_mode else 20.0
+        if high_freq is None:
+            nyquist = 0.5 * fs
+            high_freq = min(3800.0, nyquist - 100.0) if self.telephony_mode else nyquist - 100.0
+        self.low_freq = max(0.0, float(low_freq))
+        self.high_freq = max(self.low_freq + 10.0, float(high_freq))
         # self.input_cache = None
         # self.lfr_splice_cache = []
 
@@ -360,6 +390,8 @@ class WavFrontendOnline(nn.Module):
                     energy_floor=0.0,
                     window_type=self.window,
                     sample_frequency=self.fs,
+                    low_freq=self.low_freq,
+                    high_freq=self.high_freq,
                 )
 
                 feat_length = mat.size(0)
