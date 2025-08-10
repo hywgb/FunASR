@@ -264,7 +264,15 @@ class AutoModel:
         kwargs["input_size"] = None
         if frontend is not None:
             frontend_class = tables.frontend_classes.get(frontend)
-            frontend = frontend_class(**kwargs.get("frontend_conf", {}))
+            frontend_conf = kwargs.get("frontend_conf", {}) or {}
+            # auto-enable telephony for <=8k if not explicitly set
+            fs_val = int(frontend_conf.get("fs", 16000))
+            if "telephony_mode" not in frontend_conf and fs_val <= 8000:
+                frontend_conf["telephony_mode"] = True
+            # try to use knf if available unless explicitly disabled
+            if "use_knf" not in frontend_conf:
+                frontend_conf["use_knf"] = True
+            frontend = frontend_class(**frontend_conf)
             kwargs["input_size"] = (
                 frontend.output_size() if hasattr(frontend, "output_size") else None
             )

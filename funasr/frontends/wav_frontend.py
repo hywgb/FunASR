@@ -11,6 +11,13 @@ from torch.nn.utils.rnn import pad_sequence
 import funasr.frontends.eend_ola_feature as eend_ola_feature
 from funasr.register import tables
 
+# optional high-performance fbank backend
+try:
+    import kaldi_native_fbank as knf  # type: ignore
+    _KNF_AVAILABLE = True
+except Exception:
+    _KNF_AVAILABLE = False
+
 
 def load_cmvn(cmvn_file):
     with open(cmvn_file, "r", encoding="utf-8") as f:
@@ -97,6 +104,7 @@ class WavFrontend(nn.Module):
         telephony_mode: bool = False,
         low_freq: float = None,
         high_freq: float = None,
+        use_knf: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -126,6 +134,23 @@ class WavFrontend(nn.Module):
         self.low_freq = max(0.0, float(low_freq))
         self.high_freq = max(self.low_freq + 10.0, float(high_freq))
 
+        # high-performance backend
+        self.use_knf = bool(use_knf and _KNF_AVAILABLE)
+        if self.use_knf:
+            opts = knf.FbankOptions()
+            opts.frame_opts.samp_freq = fs
+            opts.frame_opts.dither = dither
+            opts.frame_opts.window_type = window
+            opts.frame_opts.frame_shift_ms = float(frame_shift)
+            opts.frame_opts.frame_length_ms = float(frame_length)
+            opts.mel_opts.num_bins = n_mels
+            opts.energy_floor = 0
+            opts.frame_opts.snip_edges = snip_edges
+            opts.mel_opts.debug_mel = False
+            opts.mel_opts.low_freq = float(self.low_freq)
+            opts.mel_opts.high_freq = float(self.high_freq)
+            self.knf_opts = opts
+
     def output_size(self) -> int:
         return self.n_mels * self.lfr_m
 
@@ -144,19 +169,23 @@ class WavFrontend(nn.Module):
             if self.upsacle_samples:
                 waveform = waveform * (1 << 15)
             waveform = waveform.unsqueeze(0)
-            mat = kaldi.fbank(
-                waveform,
-                num_mel_bins=self.n_mels,
-                frame_length=min(self.frame_length,waveform_length/self.fs*1000),
-                frame_shift=self.frame_shift,
-                dither=self.dither,
-                energy_floor=0.0,
-                window_type=self.window,
-                sample_frequency=self.fs,
-                snip_edges=self.snip_edges,
-                low_freq=self.low_freq,
-                high_freq=self.high_freq,
-            )
+            if self.use_knf:
+                mat_np = self._fbank_knf(waveform.squeeze(0))
+                mat = torch.from_numpy(mat_np)
+            else:
+                mat = kaldi.fbank(
+                    waveform,
+                    num_mel_bins=self.n_mels,
+                    frame_length=min(self.frame_length,waveform_length/self.fs*1000),
+                    frame_shift=self.frame_shift,
+                    dither=self.dither,
+                    energy_floor=0.0,
+                    window_type=self.window,
+                    sample_frequency=self.fs,
+                    snip_edges=self.snip_edges,
+                    low_freq=self.low_freq,
+                    high_freq=self.high_freq,
+                )
 
             if self.lfr_m != 1 or self.lfr_n != 1:
                 mat = apply_lfr(mat, self.lfr_m, self.lfr_n)
@@ -173,6 +202,17 @@ class WavFrontend(nn.Module):
             feats_pad = pad_sequence(feats, batch_first=True, padding_value=0.0)
         return feats_pad, feats_lens
 
+    def _fbank_knf(self, waveform_16bit_scaled: torch.Tensor) -> np.ndarray:
+        # waveform_16bit_scaled: 1D torch tensor with 16bit scale applied
+        w = waveform_16bit_scaled.cpu().numpy().astype(np.float32)
+        fbank_fn = knf.OnlineFbank(self.knf_opts)
+        fbank_fn.accept_waveform(self.knf_opts.frame_opts.samp_freq, w.tolist())
+        frames = fbank_fn.num_frames_ready
+        mat = np.empty([frames, self.knf_opts.mel_opts.num_bins], dtype=np.float32)
+        for j in range(frames):
+            mat[j, :] = fbank_fn.get_frame(j)
+        return mat
+
     def forward_fbank(
         self, input: torch.Tensor, input_lengths: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -184,18 +224,22 @@ class WavFrontend(nn.Module):
             waveform = input[i][:waveform_length]
             waveform = waveform * (1 << 15)
             waveform = waveform.unsqueeze(0)
-            mat = kaldi.fbank(
-                waveform,
-                num_mel_bins=self.n_mels,
-                frame_length=self.frame_length,
-                frame_shift=self.frame_shift,
-                dither=self.dither,
-                energy_floor=0.0,
-                window_type=self.window,
-                sample_frequency=self.fs,
-                low_freq=self.low_freq,
-                high_freq=self.high_freq,
-            )
+            if self.use_knf:
+                mat_np = self._fbank_knf(waveform.squeeze(0))
+                mat = torch.from_numpy(mat_np)
+            else:
+                mat = kaldi.fbank(
+                    waveform,
+                    num_mel_bins=self.n_mels,
+                    frame_length=self.frame_length,
+                    frame_shift=self.frame_shift,
+                    dither=self.dither,
+                    energy_floor=0.0,
+                    window_type=self.window,
+                    sample_frequency=self.fs,
+                    low_freq=self.low_freq,
+                    high_freq=self.high_freq,
+                )
 
             feat_length = mat.size(0)
             feats.append(mat)
@@ -381,18 +425,22 @@ class WavFrontendOnline(nn.Module):
                 )
                 waveform = waveform * (1 << 15)
                 waveform = waveform.unsqueeze(0)
-                mat = kaldi.fbank(
-                    waveform,
-                    num_mel_bins=self.n_mels,
-                    frame_length=self.frame_length,
-                    frame_shift=self.frame_shift,
-                    dither=self.dither,
-                    energy_floor=0.0,
-                    window_type=self.window,
-                    sample_frequency=self.fs,
-                    low_freq=self.low_freq,
-                    high_freq=self.high_freq,
-                )
+                if self.use_knf:
+                    mat_np = self._fbank_knf(waveform.squeeze(0))
+                    mat = torch.from_numpy(mat_np)
+                else:
+                    mat = kaldi.fbank(
+                        waveform,
+                        num_mel_bins=self.n_mels,
+                        frame_length=self.frame_length,
+                        frame_shift=self.frame_shift,
+                        dither=self.dither,
+                        energy_floor=0.0,
+                        window_type=self.window,
+                        sample_frequency=self.fs,
+                        low_freq=self.low_freq,
+                        high_freq=self.high_freq,
+                    )
 
                 feat_length = mat.size(0)
                 feats.append(mat)
