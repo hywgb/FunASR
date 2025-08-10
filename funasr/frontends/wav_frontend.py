@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torchaudio.compliance.kaldi as kaldi
 from torch.nn.utils.rnn import pad_sequence
+import logging
 
 import funasr.frontends.eend_ola_feature as eend_ola_feature
 from funasr.register import tables
@@ -150,6 +151,9 @@ class WavFrontend(nn.Module):
             opts.mel_opts.low_freq = float(self.low_freq)
             opts.mel_opts.high_freq = float(self.high_freq)
             self.knf_opts = opts
+        logging.getLogger("funasr").info(
+            f"WavFrontend(use_knf={self.use_knf}, fs={self.fs}, telephony={self.telephony_mode}, low={self.low_freq}, high={self.high_freq})"
+        )
 
     def output_size(self) -> int:
         return self.n_mels * self.lfr_m
@@ -340,6 +344,9 @@ class WavFrontendOnline(nn.Module):
             self.knf_opts.mel_opts.debug_mel = False
             self.knf_opts.mel_opts.low_freq = float(self.low_freq)
             self.knf_opts.mel_opts.high_freq = float(self.high_freq)
+        logging.getLogger("funasr").info(
+            f"WavFrontendOnline(use_knf={self.use_knf}, fs={self.fs}, telephony={self.telephony_mode}, low={self.low_freq}, high={self.high_freq})"
+        )
         # self.input_cache = None
         # self.lfr_splice_cache = []
 
